@@ -1,0 +1,344 @@
+import sys
+import json
+import time
+import threading
+from common_headers import serverRole,opOutcome
+class Server(process):
+	def setup(bankName,master,delay,ltime,sendLife,recvLife,servId):
+		self.processedTrans = []
+		self.sentTrans = []
+		self.transfers = [] 
+		self.successor = None
+		self.predecessor = None
+		self.accounts = {}
+		self.role = serverRole.undefined
+		self.noOfSends = 0
+		self.noOfRecvs = 0
+		self.heads = set()
+
+	def receive(msg = ('BALANCE',reqID,accountNumber,0), from_=p):
+		noOfRecvs += 1
+		noOfSends += 1
+		if(noOfRecvs >= recvLife):
+			send(('KILL_MYSELF',),to=self.id)
+		else:	
+			if ((accountNumber in accounts) and (role == serverRole.tail)):
+				send(('REPLY',reqID,opOutcome.processed, accountNumber, accounts[accountNumber]), to=p)
+			else:
+				send(('REPLY',reqID,opOutcome.illegal, accountNumber, 0), to = p)
+	
+	def receive(msg = ('DEPOSIT', reqID, accountNumber, amount), from_ = p):
+		noOfRecvs += 1	
+		if(noOfRecvs >= recvLife):
+			send(('KILL_MYSELF',),to=self.id)
+		else:
+			if(reqMatch((reqID, accountNumber, amount), processedTrans) == "CONSISTENT"):
+				sync(reqID,opOutcome.processed,p, accountNumber, amount, accounts[accountNumber], None, None)
+			elif (reqMatch((reqID, accountNumber, amount), processedTrans) == "INCONSTENT"):
+				sync(reqID,opOutcome.incon_hist,p, accountNumber, amount, accounts[accountNumber], None, None)
+			elif amount < 0:
+				if accountNumber in accounts:
+					sync(reqID, opOutcome.invalid_amount, p, accountNumber, amount, accounts[accountNumber],None, None)
+				else:
+					sync(reqID, opOutcome.illegal, p, accountNumber, amount, 0,None, None)
+		
+			elif accountNumber in accounts:
+				if ((role == serverRole.head) or (role == serverRole.stand_alone)):
+					accounts[accountNumber]+=amount
+					processedTrans.append((reqID, p, accountNumber, amount, accounts[accountNumber], opOutcome.processed, None, None))
+					sync(reqID, opOutcome.processed, p, accountNumber, amount, accounts[accountNumber], None, None)
+				else:
+					output("server: Non-head received deposit request")
+					sync(reqID, opOutcome.illegal, p, accountNumber, amount, 0, None, None) 
+			else:
+				#account does not exist in this bank
+				if ((role == serverRole.head) or (role == serverRole.stand_alone)):
+					output("Server: Account does not exist "+str(reqID))
+					accounts[accountNumber] = amount;
+					processedTrans.append((reqID, p, accountNumber, amount, accounts[accountNumber],opOutcome.processed, None, None))
+					sync(reqID, opOutcome.processed, p, accountNumber, amount, accounts[accountNumber], None, None)
+				else:
+					output("Server: account Does Not exist,Non-Head ")
+					sync(reqID, opOutcome.illegal, p, accountNumber, amount, 0, None, None) 
+
+	def receive(msg = ('WITHDRAW', reqID, accountNumber, amount), from_ = p):
+		noOfRecvs += 1	
+		if(noOfRecvs >= recvLife):
+			send(('KILL_MYSELF',),to=self.id)
+		else:
+			if(reqMatch((reqID, accountNumber, amount), processedTrans) == "CONSISTENT"):
+				sync(reqID,opOutcome.processed,p, accountNumber, amount, accounts[accountNumber], None, None)
+			elif (reqMatch((reqID, accountNumber, amount), processedTrans) == "INCONSTENT"):
+				sync(reqID,opOutcome.incon_hist,p, accountNumber, amount, accounts[accountNumber], None, None)
+			elif amount < 0:
+		                if accountNumber in accounts:
+		                        sync(reqID, opOutcome.invalid_amount, p, accountNumber, amount, accounts[accountNumber], None, None)
+		                else:
+		                        sync(reqID, opOutcome.illegal, p, accountNumber, amount, 0, None, None)
+
+			elif accountNumber in accounts:
+		                if ((role == serverRole.head) or (role == serverRole.stand_alone)):
+		                        if (amount <= accounts[accountNumber]):
+		                        	accounts[accountNumber]-=amount
+		                        	processedTrans.append((reqID, p, accountNumber, amount, accounts[accountNumber],opOutcome.processed, None, None))
+		                        	sync(reqID, opOutcome.processed, p, accountNumber, amount, accounts[accountNumber], None, None)
+		                        else:
+		                                sync(reqID, opOutcome.insuf_funds, p, accountNumber, amount, accounts[accountNumber], None, None)
+		                else:
+		                        output("Server: Non-head received request "+bankName)
+		                        sync(reqID, opOutcome.illegal, p, accountNumber, amount, 0, None, None)
+			else:
+		                #account does not exist in this bank
+		                if ((role == serverRole.head) or (role == serverRole.stand_alone)):
+		                        accounts[accountNumber] = 0;
+		                        processedTrans.append((reqID, p, accountNumber, amount, accounts[accountNumber], opOutcome.processed, None, None))
+		                        sync(reqID, opOutcome.insuf_funds, p, accountNumber, amount, accounts[accountNumber], None, None)
+		                else:
+		                        output("Server: account Does Not exist,Non-Head")
+		                        sync(reqID, opOutcome.illegal, p, accountNumber, amount, 0, None, None)
+
+	def receive( msg = ('TRANSFER', reqID, accountNumber, amount, destBank, destAccount), from_=p):
+		noOfRecvs += 1	
+		if(noOfRecvs >= recvLife):
+			send(('KILL_MYSELF',),to=self.id)
+		else:
+			if(reqMatch((reqID, accountNumber, amount), processedTrans) == "CONSISTENT"):
+				result = getProcResult(reqID, processedTrans)
+				sync(reqID, result, p, accountNumber, amount, accounts[accountNumber], None, None)
+			elif (reqMatch((reqID, accountNumber, amount), processedTrans) == "INCONSTENT"):
+				sync(reqID,opOutcome.incon_hist,p, accountNumber, amount, accounts[accountNumber], destBank, destAccount)
+			if accountNumber in accounts:
+				if ((role == serverRole.head) or (role == serverRole.stand_alone)):
+					if (amount <= accounts[accountNumber]):
+						accounts[accountNumber]-=amount
+						processedTrans.append((reqID, p, accountNumber, amount, accounts[accountNumber],opOutcome.processed, destBank, destAccount))
+						sync(reqID, opOutcome.processed, p, accountNumber, amount, accounts[accountNumber], destBank, destAccount)
+					else:
+						sync(reqID, opOutcome.insuf_funds, p, accountNumber, amount, accounts[accountNumber], destBank, destAccount)
+				else:
+					output("Server: Non-head received request "+bankName)
+					sync(reqID, opOutcome.illegal, p, accountNumber, amount, 0, destBank, destAccount)
+			else:
+		                #account does not exist in this bank
+				if ((role == serverRole.head) or (role == serverRole.stand_alone)):
+					accounts[accountNumber] = 0;
+					processedTrans.append((reqID, p, accountNumber, amount, accounts[accountNumber], opOutcome.processed, None, None))
+					sync(reqID, opOutcome.insuf_funds, p, accountNumber, amount, accounts[accountNumber], destAccount, destAccount)
+				else:
+					output("Server: account Does Not exist,Non-Head")
+					sync(reqID, opOutcome.illegal, p, accountNumber, amount, 0, destAccount, destAccount)
+
+	def receive(msg=('HEAD_UPDATE',bank,head),from_=master):
+		heads.add((bank,head))
+
+	def sendDepositForTransfer(reqID,resultWithdraw,client,accountNumber,amount,balance,destBank,destAccount,nretries):	
+		output("Server: Sending Deposit(part of transfer) "+reqID+" "+str(amount))
+		send(('HEAD_INFO',destBank),to=master)
+		await(some((_destBank,head) in heads))
+		heads.discard((destBank,head))
+		#await(some(received(('HEAD_UPDATE',_destBank,head))))
+		output("Server: Sending Deposit(part of transfer) "+reqID+" "+str(amount)+" to "+str(head))
+		send(('DEPOSIT',reqID,destAccount,amount), to=head)
+		if(await(some(received(('REPLY',_reqID,resultDeposit,_,_))))):
+			output("Server: Transfer Done  "+reqID)
+			send(('REPLY',reqID,resultWithdraw,accountNumber,balance),to=client)
+			transfers.remove(reqID)
+			send(("ACK_SYNC",reqID), to = predecessor)
+		elif timeout(6):
+			if (nretries > 0):
+				output("Server: Resending deposit(transfer) for request Id " + reqID)
+				sendDepositForTransfer(reqID,resultWithdraw,client,accountNumber,amount,balance,destBank,destAccount,nretries-1)
+			else:
+				output("Aborting transfer "+ str(reqID))
+  
+	def sync(reqID, result, client, accountNumber, amount, balance, destBank, destAccount):
+		if role == serverRole.tail:
+			noOfSends += 1
+			output(str(noOfSends) + " bankName "+str(bankName))
+			if(noOfSends >= sendLife):
+				output(str(self.id)+ " is going to die")
+				send(('KILL_MYSELF',),to=self.id)
+			else:
+				if successor:
+					send(('ACCOUNT_UPDATE', reqID, client, result, accountNumber, amount, balance, destBank, destAccount), to= successor)
+				if destBank != None and result == opOutcome.processed:
+					transfers.append(reqID)
+					nretries = 3
+					sendDepositForTransfer(reqID,result,client,accountNumber,amount,balance,destBank,destAccount,nretries)
+				else:
+					send(('REPLY',reqID, result, accountNumber, balance), to = client)
+            				#send ack to predecessor
+					send(("ACK_SYNC",reqID), to = predecessor)
+		elif ( role == serverRole.waiting_tobe_tail):pass
+		else:
+			if not destBank:
+				sentTrans.append(reqID)
+			else:
+				transfers.append(reqID)
+			if successor:
+				send(('ACCOUNT_UPDATE', reqID, client, result, accountNumber, amount, balance, destBank, destAccount), to = successor)
+
+	def receive(msg = ('ACK_SYNC',reqID), from_ = p):
+		if reqID in sentTrans:
+			sentTrans.remove(reqID)
+			if predecessor:
+				send(('ACK_SYNC', reqID), to = predecessor)
+		if reqID in transfers:
+			transfers.remove(reqID)
+			if predecessor:
+				send(('ACK_SYNC', reqID), to = predecessor)
+
+	def receive(msg = ('ACCOUNT_UPDATE',reqID, client, result, accountNumber, amount, balance, destBank, destAccount ), from_= pred):
+		if (((reqID, client, accountNumber,amount,balance,result,destBank,destAccount)  not in processedTrans) and ((result == opOutcome.processed) or (result == opOutcome.insuf_funds))):
+			#execute the result in process
+			accounts[accountNumber] =  balance
+			processedTrans.append((reqID,client, accountNumber, amount, accounts[accountNumber],result, destBank, destAccount))
+		sync(reqID, result,client, accountNumber, amount, balance, destBank, destAccount)
+
+	def receive(msg =('STAND_ALONE',), from_=master):
+		output("Server: I am stand alone "+bankName)
+		role = serverRole.stand_alone
+
+	def receive(msg = ('PROMOTE_TO_HEAD',), from_=master):
+		output("Server: Received promote to head")
+		predecessor = None
+		if( role == serverRole.tail):
+			role = serverRole.stand_alone
+		else:
+			#output("i am new head")
+			role = serverRole.head
+
+	def receive(msg=('PROMOTE_TO_TAIL',), from_ = master):
+		successor = None
+		if( role == serverRole.head):
+			#make myself stand alone
+			role = serverRole.stand_alone	
+		else:
+			output("Server: promoted to tail")
+			role = serverRole.tail
+		if(len(transfers) != 0):
+			for reqID in transfers:
+				tup = [x for x in processedTrans if x[0]==reqID]
+				nretries = 3
+				output("Resending deposit(as a part of transfer) as the new tail")
+				sendDepositForTransfer(tup[0][0],tup[0][5],tup[0][1],tup[0][2],tup[0][3],tup[0][4],tup[0][6],tup[0][7],nretries)
+				
+
+	def receive(msg = ('PREDECESSOR_UPDATE',newPred),from_ = master ):
+		predecessor  = newPred
+		output("Server: I have a new predecessor "+str(newPred))
+		if len(sentTrans):
+			lastReqID = sentTrans[-1]
+		else:
+			lastReqID = 0
+		send(('PREDECESSOR_RECONCILE',lastReqID), to= master)
+
+	def receive(msg = ('NEW_TAIL_JOINED',tail), from_ = master):
+		output("Server: a new tail joined "+bankName)
+		if(role == serverRole.stand_alone):
+			role = serverRole.head
+		'''elif( role == serverRole.tail):
+			role = serverRole.transient_tail'''
+		successor = tail
+		for tup in processedTrans:
+			#output(tup)
+			output("Server: Sending to new tail ReqId: "+ tup[0]) 
+			#sync(tup[0],opOutcome.processed,tup[1],tup[2],tup[3], tup[4])
+			send(('SYNC_PROCTABLE', tup[0],tup[1],tup[2],tup[3],tup[4],tup[5], tup[6], tup[7]), to = successor)
+		send(('END_OF_SENT',),to=successor)
+	def receive(msg = ('SYNC_PROCTABLE',ReqId, Client, AccountNumber, Amount, Balance, Result, destBank, destAccount), from_= pred):
+		output("Server: Syncing with predecessor")
+		processedTrans.append((ReqId, Client, AccountNumber, Amount, Balance,Result, destBank, destAccount))
+
+	def receive(msg = ('BECOME_INTERNAL',), from_ = master):
+		role = serverRole.internal
+		
+
+	def receive(msg = ('END_OF_SENT',), from_ = pred):
+        	role = serverRole.tail
+        	send(('ACK_AS_TAIL',), to = master)
+
+	def receive(msg = ('ACK_JOIN_AS_TAIL',pred), from_=master):
+		predecessor = pred
+		role = serverRole.waiting_tobe_tail
+		#output("Server: ack to join as tail "+bankName)
+	
+        
+	def receive(msg =('SUCCESSOR_UPDATE',newSuc, sucLatestReqID), from_ = master ):
+		output("Server: I have a new successor "+str(newSuc))
+		successor = newSuc
+		if sucLatestReqID in sentTrans:
+			indx  = sentTrans.index(sucLatestReqID)
+			for reqID in sentTrans[indx:]:
+				for tup in processedTrans:
+					if reqID == tup[0]:
+						output("Sending to new successor ReqId: "+ tup[0])
+						#sync(reqID, opOutcome.processed, tup[1],tup[2],tup[3], tup[4])
+						send(('ACCOUNT_UPDATE', tup[0], tup[1], opOutcome.processed, tup[2], tup[3],tup[4], tup[6], tup[7]), to=successor)
+		elif sucLatestReqID == 0:
+			for reqID in sentTrans:
+				for tup in processedTrans:
+					if reqID == tup[0]:
+						output("Server: Sending to new successor ReqId: "+ tup[0])
+						#sync(reqID, opOutcome.processed, tup[1],tup[2],tup[3], tup[4])
+						send(('ACCOUNT_UPDATE', tup[0], tup[1], opOutcome.processed, tup[2], tup[3],tup[4], tup[6],tup[7]), to=successor)
+	def sendHeartBeat():
+		#output("sending hearbeat to master\n")
+		send(('HEARTBEAT',), to = master)
+		threading.Timer(5,sendHeartBeat).start()
+	def register():
+		time.sleep(delay)
+		send(('JOIN_AS_TAIL',bankName), to = master)
+
+	def killMySelf():
+		output("Server: killing process"+str(self.id))
+		#sys.exit()
+		send(('KILL_MYSELF',),to=self.id)
+
+	def run():
+		register()
+		threading.Timer(ltime,killMySelf).start()
+		sendHeartBeat()
+		await(some(received(('KILL_MYSELF',))))
+
+	def reqMatch(reqTup, List):
+		for tup in List:
+			if ((tup[0] == reqTup[0]) and (tup[4] == reqTup[2])):
+				return "CONSISTENT"
+			elif (tup[0] == reqTup[0]):
+				return "INCONSISTENT"
+		return "NEW_REQ"
+	def getProcResult(reqID, List):
+		for tup in List:
+			if( tup[0] == reqID ):
+				return tup[5]
+		return None
+
+def main(master,fileName):
+	json_data = open(fileName)
+	info = json.load(json_data)
+	config(channel='reliable')
+	bank_srv_list = set()
+	bank_srv_dict = {}
+	for bank in info['master']['banks']:
+			delayList = []
+			lifeTimeList =[]
+			sendLifeList = []
+			recvLifeList = []
+			servIdList = []
+			bank_srv_list = new(Server,num=bank['bank_clength'])
+			for server in bank['servers']:
+				delayList.append(server['serv_sdelay']) 
+				lifeTimeList.append(server['serv_ltime'])
+				servIdList.append(server['serv_id'])
+				sendLifeList.append(server['serv_snd_life'])
+				recvLifeList.append(server['serv_rcv_life'])
+			i = 0
+			for serv in bank_srv_list:
+				setup({serv}, [bank['bank_name'],master,delayList[i],lifeTimeList[i],sendLifeList[i],recvLifeList[i],servIdList[i]])
+				i = i + 1
+			bank_srv_dict[bank['bank_name']] = bank_srv_list
+	
+	for bank in bank_srv_dict:
+		start(bank_srv_dict[bank])
+
